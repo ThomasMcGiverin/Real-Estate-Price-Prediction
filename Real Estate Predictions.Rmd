@@ -1,0 +1,635 @@
+---
+title: "Real Estate Predictions"
+author: "Thomas McGiverin"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-packages, include=F}
+library(ggplot2)
+library(GGally)
+library(dplyr)
+library(knitr)
+library(caret)
+library(xgboost)
+library(e1071)
+```
+
+
+# Introduction
+In this project, I will be building machine learning models for the purpose of predicting the price of a house given a set of features related to the house.
+
+The dataset I will be using is the Ames Housing dataset. The data describes the sale of individual residential properties in Ames, Iowa from 2006 to 2010. There are 1460 observations with 79 explanatory variables (nominal, ordinal, discrete, and continuous) which are involved in the assessment of the value of a house.
+
+# Variable Selection
+```{r}
+# Read in data
+raw_housing_data <- read.csv("train.csv")
+
+# Display names of columns
+names(raw_housing_data)
+```
+
+With such a large number of features to include in a model, I will be selecting a subset of features which I believe to be strong predictors in the value of a house. The features I will choose come from my knowledge of the real estate market and what I know to have an impact on the house price.
+
+It is important to consider that there are only 1460 observation in the test set and many of the categorical variables have a large number of levels which can make the impractical to use.
+
+```{r, message=F}
+raw_subset <- raw_housing_data %>% select(BldgType, LotArea, Street, Utilities, 
+                                          HouseStyle, OverallQual, OverallCond,
+                                          YearBuilt, YearRemodAdd, BsmtFinType1,
+                                          BsmtUnfSF, Heating, CentralAir, 
+                                          GrLivArea, FullBath, BedroomAbvGr, 
+                                          GarageCars, SalePrice)
+```
+
+* BldgType: Type of dwelling
+* LotArea: Lot size in square feet
+* Street: Type of road access to property
+* Utilities: Type of utilities available
+* HouseStyle: Style of dwelling
+* OverallQual: Rates the overall material and finish of the house
+* OverallCond: Rates the overall condition of the house
+* YearBuilt: Original construction date
+* YearRemodAdd: Remodel date (same as construction date if no remodeling or additions)
+* BsmtFinType1: Rating of basement finished area
+* BsmtUnfSF: Unfinished square feet of basement area
+* Heating: Type of heating
+* CentralAir: Central air conditioning
+* GrLivArea: Above grade (ground) living area square feet
+* FullBath: Full bathrooms above grade
+* BedroomAbvGr: Bedrooms above grade (does NOT include basement bedrooms)
+* GarageCars: Size of garage in car capacity
+
+This is the list of variables I have chosen to be most impactful from the full list of 79. I have been able to narrow down the number of features to 17, however, for such a small sample size I believe that less features would still be better. To narrow down the list of features more, I will perform EDA on the 17 features to determine if any of them seem to carry little to no information and can then be removed from the analysis.
+
+## Feature Analysis
+
+### Categorical variables
+
+Here I will analyze all categorical features to determine if any can be removed.
+
+```{r, message=F}
+# Convert character columns to factors
+raw_subset$BldgType <- as.factor(raw_subset$BldgType)
+raw_subset$Street <- as.factor(raw_subset$Street)
+raw_subset$Utilities <- as.factor(raw_subset$Utilities)
+raw_subset$HouseStyle <- as.factor(raw_subset$HouseStyle)
+raw_subset$BsmtFinType1 <- as.factor(raw_subset$BsmtFinType1)
+raw_subset$Heating <- as.factor(raw_subset$Heating)
+raw_subset$CentralAir <- as.factor(raw_subset$CentralAir)
+
+# Create separate dataframe for categorical variables
+raw_cat <- raw_subset %>% select(BldgType, Street, Utilities, HouseStyle,
+                                 BsmtFinType1, Heating, CentralAir, SalePrice)
+
+# Plot a histogram for each of the categorical variables to analyze distribution
+par(mfrow=c(2,1))
+plot(raw_cat$BldgType, main="BldgType")
+plot(raw_cat$Street, main="Street")
+
+par(mfrow=c(2,1))
+plot(raw_cat$Utilities, main="Utilities")
+plot(raw_cat$HouseStyle, main="HouseStyle")
+
+par(mfrow=c(2,1))
+plot(raw_cat$BsmtFinType1, main="BsmtFinType1")
+plot(raw_cat$Heating, main="Heating")
+
+par(mfrow=c(2,1))
+plot(raw_cat$CentralAir, main="CentralAir")
+
+
+# Create a pairs plot to analyze the variables which are heavily imbalanced
+par(mfrow=c(1,1))
+ggpairs(raw_cat[c("Street", "Utilities", "Heating", "SalePrice")])
+
+# Summary of categorical variables to determine the distributions numerically
+summary(raw_cat)
+```
+
+From these charts it appears that we can exclude Street, Utilities, and Heating since their levels are very imbalanced with one level having nearly all observations.
+
+### Numerical variables
+
+I will now perform an analysis for all numerical variables to determine if any can be removed to increase the simplicity of future models.
+```{r, message=F}
+# Create dataframe for numerical features
+raw_num <- raw_subset %>% select(LotArea, OverallQual, OverallCond, YearBuilt, 
+                                 YearRemodAdd, BsmtUnfSF, GrLivArea, FullBath,
+                                 BedroomAbvGr, GarageCars, SalePrice)
+
+# Create pairs plot for all numerical variables
+ggpairs(raw_num[c("LotArea", "OverallQual", "OverallCond", "YearBuilt",
+                  "YearRemodAdd", "SalePrice")])
+
+ggpairs(raw_num[c("BsmtUnfSF", "GrLivArea", "FullBath", "BedroomAbvGr",
+                  "GarageCars", "SalePrice")])
+```
+
+Based on the analysis of these plots, I am going to remove YearRemodAdd since this feature is duplicating a lot of information from YearBuilt and the correlation between sales price and YearRemodAdd and YearBuilt is very similar.
+
+## Final Selection
+
+Based on the above analysis of the 17 features that I had initially selected as being impactful to the value of a house, I have removed 3 categorical features and 1 numerical feature. These 13 features will be used moving forwards for the prediction of the value of the price of a house.
+
+* BldgType: Type of dwelling
+* LotArea: Lot size in square feet
+* HouseStyle: Style of dwelling
+* OverallQual: Rates the overall material and finish of the house
+* OverallCond: Rates the overall condition of the house
+* YearBuilt: Original construction date
+* BsmtFinType1: Rating of basement finished area
+* BsmtUnfSF: Unfinished square feet of basement area
+* CentralAir: Central air conditioning
+* GrLivArea: Above grade (ground) living area square feet
+* FullBath: Full bathrooms above grade
+* BedroomAbvGr: Bedrooms above grade (does NOT include basement bedrooms)
+* GarageCars: Size of garage in car capacity
+
+```{r}
+# Create dataframe for the 13 features that have been selected
+house_subset <- raw_housing_data %>% select(Id, BldgType, LotArea, HouseStyle, 
+                                            OverallQual, OverallCond, YearBuilt,
+                                            BsmtFinType1, BsmtUnfSF, CentralAir, 
+                                            GrLivArea, FullBath, BedroomAbvGr, 
+                                            GarageCars, SalePrice)
+
+
+# Output head of data
+kable(head(house_subset),
+      col.names = c("Id", "Bldg", "Area", "Style", "Qual", "Cond", "Built", "BsmtType",
+                    "BsmtSF", "AC", "LivArea", "Bath", "Bed", "Garage", "Price"))
+```
+
+# Preprocessing
+
+## Missing Data
+In this section I will check the quality of the data and perform and necessary preprocessing that will be required for future analysis of the data.
+
+First I will check if there are any missing values for the features.
+
+```{r}
+# Count the number of NA values in each column 
+na_count <- sapply(house_subset, function(y) sum(length(which(is.na(y)))))
+kable(data.frame(na_count))
+```
+
+Here we see that BsmtFinType1 is the only column with missing values. Checking the data dictionary provided with the data file, it states that BsmtFinType1 is NA if the house does not have a basement. To remedy this I shall change the NA values to "NO" to indicate that the house does not have a basement.
+
+```{r}
+# Replace NA with "NO"
+house_subset$BsmtFinType1[is.na(house_subset$BsmtFinType1)] <- "NO"
+```
+
+## Outliers
+
+Here I will check all columns for outliers using Tukey's definition of an outlier
+```{r}
+# Take a numeric vector as input and output the upper and lower bound of the
+# outlier boundary based on Tukey's definition
+far_outlier <- function(v) {
+  v <- v[!is.na(v)]
+
+  q1 <- quantile(v, 0.25, names = F)
+  q3 <- quantile(v, 0.75, names = F)
+
+  return(c(low = (q1 - 1.5 * (q3 - q1)) ,high = (q3 + 1.5 * (q3 - q1))))
+}
+
+# Takes a numeric vector as input and outputs 
+is_outlier <- function(v) {
+  v <- v[!is.na(v)]
+  cutoff <- far_outlier(v)
+  contains_outlier <- (v > cutoff[2]) | (v < cutoff[1])
+
+  if (sum(contains_outlier) > 0) {
+    return(T)
+  } else {
+    return(F)
+  }
+}
+
+numeric_tibble <- dplyr::select_if(house_subset, is.numeric)
+
+for (col in names(numeric_tibble)) {
+  if (is_outlier(numeric_tibble[col])) {
+    
+    outlier_range <- far_outlier(numeric_tibble[col])
+    
+    print(paste(
+      "Non-Outlier range for", col, "is",
+      round(outlier_range[1], 2), "to",
+      round(outlier_range[2], 2)
+    ))
+
+    print(paste(nrow(filter(house_subset, house_subset[col] > outlier_range[2] |
+                                house_subset[col] < outlier_range[1] )), "outliers found"))
+  }
+}
+```
+
+It is important to note here that outliers do not make sense for OverallQual and OverallCond since they are ordinal variables. Furthermore upon manual analysis of these outliers, I see no reason to believe that they are due to data entry errors nor do I have any reason to believe that they do not belong in the analysis. Therefore I will be including all observations which have been identified as outliers.If the outliers prove to be troublesome later on then I may consider removing them.
+
+We can now proceed to using this preprocessed data to build statistical and machine learning models for the purpose of predicting the price of a house. I will now split the data into a train and test splits using 75% of the data for the train set and 25% for test.
+
+```{r}
+# Split data into train and test set
+set.seed(1000)
+
+house_train <- house_subset %>% dplyr::sample_frac(.75)
+house_test <- dplyr::anti_join(house_subset, house_train, by = "Id")
+
+house_train <- house_train %>% select(-Id)
+house_test <- house_test %>% select(-Id)
+```
+
+# Satistical and Machine Learning Models for Prediction
+
+## Linear Regression
+
+Linear regression is a great first model to try due to its simplicity and interpretability. If linear regression is a good model for the problem then a lot of the structure surrounding the relationships between the variables has been revealed. 
+
+### Train
+
+```{r}
+# Linear regression
+house.lm <- lm(house_train$SalePrice~., data=house_train)
+
+summary(house.lm)
+```
+With an R-squared value of 0.7917, our model is able to explain 79.17% of the variability in the data which is a great start. Our F-statisitc is statistically significant which means a relationship between the house features and the house price does exist. Looking at the various t-tests, we can see that BsmtUnfSF (Unfinished basement square feet), CentralAirY (Air conditioning), FullBath (Number of bathrooms) are not statistically significant for this model.
+
+However, all of what I have mentioned above does not matter unless the assumptions underlying the linear regression hold. To check this I will plot the fitted vs residuals, a normal QQ plot, and the fitted vs observed values.
+
+```{r}
+#Diagnostic plots for the linear regression
+par(mfrow=c(2,2))
+plot(fitted(house.lm), residuals(house.lm), main="Fitted vs Residuals")
+abline(h=0)
+
+qqnorm(residuals(house.lm))
+qqline(residuals(house.lm))
+
+plot(fitted(house.lm), house_train$SalePrice, main="Fitted vs Observed")
+abline(0,1)
+```
+
+There is a fairly clear non-linear pattern in the fitted vs residuals plot which is a red flag. The normal QQ plot strays far from normality in the tails of the distribution which is a potential violation of normality. In the fitted vs observed values we see a non-linear pattern in this data. All of the diagnostics together point to a linear model not being very appropriate here and we should consider a non-linear model.
+
+A very important fact to note is that the sale price of a house is a positively skewed distribution for this dataset. This leads to the natural application of the log transformation to sale price to bring the skewed distribution as close to normality as possible.
+
+```{r}
+#Histograms of sale price vs log sale price
+par(mfrow=c(2,2))
+hist(house_train$SalePrice, main="Regular Sale Price")
+hist(log(house_train$SalePrice), main="Log of Sale Price")
+
+#Normal qq plots of sale price vs log sale price
+qqnorm(house_train$SalePrice, main="Regular Sale Price QQ Plot")
+qqline(house_train$SalePrice)
+
+qqnorm(log(house_train$SalePrice), main="Log of Sale Price QQ Plot")
+qqline(log(house_train$SalePrice))
+```
+
+We see that taking the log of the sale price brings the distribution very close to normality. With this information I shall perform another linear regression but with the log transformed sale price so that the assumptions of our model will be valid.
+
+
+```{r}
+# Log linear model
+house.lm2 <- lm(log(house_train$SalePrice)~., data=house_train)
+
+summary(house.lm2)
+```
+
+The R^2 has increased 6% up to 85.27%. This means our model is now able to explain 85.27% of the variability in the data. Interestingly, BsmtUnfSF (Unfinished basement sqaure feet), and BedroomAbvGr (Bedrooms above grade) are now the only variables which are not statistically significant to the model now. In the previous model, air conditioning and number of bathrooms were not statistically significant but now they are with the transformation. Unfinished basement square feet remains not significant and bedrooms above grade is a new addition to the variables that are not statistically significant.
+
+Now we shall verify the model assumptions are valid with the log transformation.
+
+
+```{r}
+# Diagnostic plots
+par(mfrow=c(2,2))
+plot(fitted(house.lm2), residuals(house.lm2), main="Fitted vs Residuals")
+abline(h=0)
+
+qqnorm(residuals(house.lm2))
+qqline(residuals(house.lm2))
+
+plot(fitted(house.lm2), log(house_train$SalePrice), main="Fitted vs log(SalePrice)")
+abline(0,1)
+```
+
+On the fitted vs residuals plot we see a random spread of points centered around 0 with no obvious pattern. The normal QQ plot looks much better than previous but the lower tail is still a potential cause for concern. The fitted vs log of sale price is much better and it shows a clear linear trend. All of these diagnostics together point to the model assumptions being valid.
+
+### Test
+
+Here I will evaluate the performance of the model through its prediction accuracy using RMSE (Root Mean Squared Error).
+
+```{r}
+#Calculate predictions
+test <- house_test %>% select(-SalePrice)
+pred.lm <- exp(predict(house.lm2, test))
+
+#Calculate RMSE
+RMSE.lm <- sqrt(sum((house_test$SalePrice-pred.lm)^2)/length(pred.lm))
+
+kable(t(c(RMSE.lm, mean(house_train$SalePrice))), col.names = c("Linear Model RMSE", "Mean Sale Price"))
+```
+
+The RMSE is quite large as a percentage of the mean sale price. This is a solid starting point but the linear model leaves much to be desired for prediction accuracy.
+
+## Generalized Linear Model
+
+Generalized linear models are a great approach when your response variable has a distribution which comes from the exponential family. As noted earlier, the sale price of a house has a positively skewed distribution which closely matches a gamma distribution. For this reason I will be fitting a gamma GLM with a log link.
+
+### Train
+
+```{r}
+# Gamma Generalized Linear Model With Log Link
+house.glm = glm(house_train$SalePrice~., family=Gamma("log"), data=house_train)
+
+summary(house.glm)
+```
+
+Here we see that the number of full bathrooms and the number of bedrooms above grade are statistically insignificant to the model.
+
+Let us perform an asymptotic chi-squared test to determine if our model has a good fit to the data.
+
+```{r}
+# Likelihood Ratio Test
+kable(t(c(LRT=house.glm$deviance,
+  df=house.glm$df.residual,
+  p.val=pchisq(house.glm$deviance, house.glm$df.residual,lower=F))))
+```
+
+Here we see that the p-value is 1 so we fail to reject the null hypothesis and conclude that the proposed model fits the data well in comparison to the saturated model.
+
+Now let us examine the diagnostic plots to determine if the statistical inference is valid
+
+```{r}
+# Diagnostic plots
+par(mfrow=c(2,2))
+plot(fitted(house.glm), residuals(house.glm, type="deviance"), main="Fitted vs Residuals")
+abline(h=0)
+
+qqnorm(residuals(house.glm, type="deviance"))
+qqline(residuals(house.glm, type="deviance"))
+
+plot(fitted(house.glm), house_train$SalePrice, main="Fitted vs Observed")
+abline(0, 1)
+```
+
+In the fitted vs residuals plot we see a mostly random scatter of points, however there does appear to be a slight pattern in the residuals which is not ideal. The normal QQ plot looks great in center but at the lower tail there is clear deviation from normality which is not great. Lastly, the fitted vs observed plot appears mostly linear. Based on these diagnostics I would say that we can moderately trust the asymptotic inference but its certainly not great.
+
+### Test
+
+Here I will evaluate the performance of the model through its prediction accuracy using RMSE (Root Mean Squared Error).
+ 
+```{r}
+#Calculate predictions
+test <- house_test %>% select(-SalePrice)
+pred.glm <- exp(predict(house.glm, test))
+
+#Calculate RMSE
+RMSE.glm <- sqrt(sum((house_test$SalePrice-pred.glm)^2)/length(pred.glm))
+
+kable(t(c(RMSE.glm, mean(house_train$SalePrice))), col.names = c("GLM RMSE", "Mean Sale Price"))
+```
+
+Here we see a slight improvement in RMSE as compared to the linear regression but it is still not ideal.
+
+## Boosted Random Forest
+
+A boosted random forest model is a great ensemble machine learning algorithm that can perform decently for all problems. Here I will be using 5-fold cross vaildation and grid search for hyperparameter optimization.
+
+### Train
+
+```{r, message=F, warning=F, results=F}
+set.seed(1000)
+model <- SalePrice~.
+
+control <- trainControl(method = "cv", number=5, classProbs=F)
+
+tune_grid <- expand.grid(nrounds = seq(from=50, to=2000, by=50),
+                         eta = c(0.05, 0.1),
+                         max_depth=c(1,2),
+                         gamma=0,
+                         colsample_bytree=c(0.1),
+                         min_child_weight=1,
+                         subsample=c(0.05))
+
+
+house.xgb <- caret::train(model,
+                                data=house_train,
+                                method="xgbTree",
+                                tuneGrid=tune_grid,
+                                trControl=control)
+
+plot(house.xgb)
+```
+
+```{r}
+house.xgb$bestTune
+varImp(house.xgb)
+```
+
+The plot here shows the performance of the model as it is trained over the grid search. We also have a list of the most important variables to the model. We see that ground living area and overall quality are rated as extremely important to the model's success.
+
+Now I will move on to testing the model.
+
+### Test
+
+```{r}
+#Calculate test set predictions
+test <- house_test %>% select(-SalePrice)
+pred.xgb <- predict(house.xgb, test)
+
+#Calculate test set RMSE
+RMSE.xgb <- sqrt(sum((house_test$SalePrice-pred.xgb)^2)/length(pred.xgb))
+
+#Calculate train set predictions
+test2 <- house_train %>% select(-SalePrice)
+pred.xgb2 <- predict(house.xgb, test2)
+
+#Calculate train set RMSE
+RMSE.xgb2 <- sqrt(sum((house_train$SalePrice-pred.xgb2)^2)/length(pred.xgb2))
+
+#Combine RMSE into single matrix
+RMSE_matrix.xgb <- rbind(c(RMSE.xgb, mean(house_train$SalePrice)), c(RMSE.xgb2, mean(house_train$SalePrice)))
+
+rownames(RMSE_matrix.xgb) <- c("Test", "Train")
+
+kable(RMSE_matrix.xgb,
+      col.names = c("XGBoost RMSE", "Mean Sale Price"))
+```
+
+Here we see that the testing RMSE is higher than the two previous models which is not great given the added complexity of interpreting the model. Our train and test error here are fairly close together but there could be an argument for some overfitting over the model.
+
+## Support Vector Machine
+
+Support vector machines are another great general purpose machine learning algorithm that can be applied to numerous problems. Here I will be using 5-fold cross validation with a polynomial kernel function.
+
+### Train
+
+```{r}
+set.seed(1000)
+model <- SalePrice~.
+
+control.svm <- trainControl(method = "cv", number=5, classProbs=F)
+
+tune_grid.svm <- expand.grid(degree=c(1,2,3,4,5),
+                             scale=c(0.001,0.01,0.1),
+                             C=c(0.25,0.5,1))
+
+house.svm <- caret::train(model,
+                          data=house_train,
+                          method="svmPoly",
+                          tuneGrid=tune_grid.svm,
+                          trControl=control.svm)
+
+plot(house.svm)
+
+house.svm$bestTune
+```
+
+The plot here shows the performance of the model as it is trained over the grid search.
+
+### Test
+
+Here I will calculate the test RMSE and the train RMSE.
+
+```{r}
+#Calculate test set predictions
+test <- house_test %>% select(-SalePrice)
+pred.svm <- predict(house.svm, test)
+
+#Calculate test set RMSE
+RMSE.svm <- sqrt(sum((house_test$SalePrice-pred.svm)^2)/length(pred.svm))
+
+#Calculate train set predictions
+test2 <- house_train %>% select(-SalePrice)
+pred.svm2 <- predict(house.svm, test2)
+
+#Calculate train set RMSE
+RMSE.svm2 <- sqrt(sum((house_train$SalePrice-pred.svm2)^2)/length(pred.svm2))
+
+#Combine RMSE into single matrix
+RMSE_matrix.svm <- rbind(c(RMSE.svm, mean(house_train$SalePrice)), c(RMSE.svm2, mean(house_train$SalePrice)))
+
+rownames(RMSE_matrix.svm) <- c("Test", "Train")
+
+kable(RMSE_matrix.svm,
+      col.names = c("SVM RMSE", "Mean Sale Price"))
+```
+
+This RMSE is the best of all of the models so far. There is a bit of a difference between the train and the test error so there is an argument to be made for overfitting in this model.
+
+## K-Nearest Neighbors
+
+Finally, I will be applying the KNN algorithm to this problem. KNN is a very simple machine learning algorithm that I would not expect to have great performance in this instance. However, it is always a good idea to try out multiple models.
+
+### Train
+
+```{r}
+set.seed(1000)
+model <- SalePrice~.
+
+control.knn <- trainControl(method = "cv", number=5, classProbs=F)
+
+tune_grid.knn <- expand.grid(k=c(3,5,7,9,11,13))
+
+house.knn <- caret::train(model,
+                          data=house_train,
+                          method="knn",
+                          tuneGrid=tune_grid.knn,
+                          trControl=control.knn)
+
+plot(house.knn)
+
+house.knn$bestTune
+```
+
+Here we see the plot of the model performance versus the number of neighbors used for the regression.
+
+### Test
+```{r}
+
+
+#Calculate test set predictions
+test <- house_test %>% select(-SalePrice)
+pred.knn <- predict(house.knn, test)
+
+#Calculate test set RMSE
+RMSE.knn <- sqrt(sum((house_test$SalePrice-pred.knn)^2)/length(pred.knn))
+
+#Calculate train set predictions
+test2 <- house_train %>% select(-SalePrice)
+pred.knn2 <- predict(house.knn, test2)
+
+#Calculate train set RMSE
+RMSE.knn2 <- sqrt(sum((house_train$SalePrice-pred.knn2)^2)/length(pred.knn2))
+
+#Combine RMSE into single matrix
+RMSE_matrix.knn <- rbind(c(RMSE.knn, mean(house_train$SalePrice)), c(RMSE.knn2, mean(house_train$SalePrice)))
+
+rownames(RMSE_matrix.knn) <- c("Test", "Train")
+
+kable(RMSE_matrix.knn,
+      col.names = c("KNN RMSE", "Mean Sale Price"))
+```
+
+Here we see very poor performance on the test set and the worst model performance overall by a large margin. Additionally we certainly have overfitting issues given the discrepency between the train and the testing error. Increasing the value of k may be able to remedy the overfitting, however, this model does not appear to be appropriate for this problem at all.
+
+
+# Conclusion
+
+Of all of the models presented in this project, I believe that the gamma Generalized Linear Model is the best approach. The gamma GLM had the second best prediction RMSE while also having the benefit of vastly superior interpretability to the SVM. If the goal is purely prediction accuracy then it appears the SVM would be the best approach here.
+
+Looking back on this project I believe that many improvements can be made to build better models and to increase prediction accuracy. Here is a list of topics which I believe could play a role in the improvement of this project in the future:
+
+* More rigorous feature selection
+* Outlier removal
+* Model stacking
+
+Furthermore, I believe that there is great potential for future analysis of this dataset which includes:
+
+* Clustering models
+* Analysis on different response variables
+
+Ultimately, the analysis of this data set has proved to be very insightful and I believe that if the improvements I have proposed are enacted, then even greater insights will follow, and prediction accuracy will increase greatly.
+
+
+
+
+
+```{r, include=F}
+# test_final <- read.csv("test.csv")
+# 
+# test_final2 <- test_final %>% select(BldgType, LotArea, HouseStyle, 
+#                                             OverallQual, OverallCond, YearBuilt,
+#                                             BsmtFinType1, BsmtUnfSF, CentralAir, 
+#                                             GrLivArea, FullBath, BedroomAbvGr, 
+#                                             GarageCars)
+# 
+# test_final2$BsmtFinType1[is.na(test_final2$BsmtFinType1)] <- "NO"
+# 
+# final_prediction <- NULL
+# final_prediction$Id <- as.data.frame(test_final$Id)
+# prediction <- as.data.frame(predict(house.svm, test_final2))
+# #final_prediction$SalePrice <- prediction
+# 
+# final_final <- cbind(final_prediction, prediction)
+# 
+# colnames(final_final) <- c("Id", "SalePrice")
+# 
+# final_final$SalePrice[is.na(final_final$SalePrice)] <- mean(house_subset$SalePrice)
+# 
+# 
+# write.csv(final_final, "./Test_submission.csv", row.names=F)
+# 
+```
